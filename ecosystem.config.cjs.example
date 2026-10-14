@@ -1,0 +1,12 @@
+module.exports = {
+  apps: [
+    {
+      name: "autosecure-bot",
+      cwd: __dirname,
+      script: ".venv/bin/python",
+      args: "bot.py",
+      autorestart: true,
+      max_restarts: 10,
+    },
+  ],
+};

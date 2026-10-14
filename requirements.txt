@@ -1,0 +1,11 @@
+py-cord
+httpx
+millify
+python-dateutil
+audioop-lts
+fake-useragent
+aiosmtpd
+requests
+bitcoinlib
+cloudscraper
+pillow
