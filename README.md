@@ -4,7 +4,7 @@
 
 ---
 
-## ⚡ Tính năng chính
+## Tính năng chính
 
 - **Core Securing Engine**: Tự động đổi email bảo mật, mật khẩu, xóa 2FA/thiết bị cũ, rời nhóm gia đình (family), tạo Recovery Code & TOTP secret.
 - **Thao tác đơn lẻ & Hàng loạt (Bulk)**: Hỗ trợ nhập tài khoản đơn hoặc xử lý danh sách lớn qua giao diện Discord Modals & Buttons.
